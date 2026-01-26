@@ -1,9 +1,19 @@
 from typing import Any
+from datetime import datetime, timedelta
+import sys
+import os
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-import logging, sys
+import logging
+
+# Add parent directory to path to import google_calendar
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from google_calendar import get_calendar_service
+
+import pytz
+from dateutil import parser as date_parser
 
 # Setup logging
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format='[OLLAMA_MCP] %(levelname)s: %(message)s')
@@ -11,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastMCP server
 logger.info("Initializing FastMCP server")
-mcp = FastMCP("weather")
+mcp = FastMCP("weather-and-calendar")
 
 # Constants
 NWS_API_BASE = "https://api.weather.gov"
@@ -19,6 +29,214 @@ USER_AGENT = "weather-app/1.0"
 OLLAMA_API_BASE = "http://localhost:11434"
 OLLAMA_MODEL = "llama3.1:8b" 
 
+
+# ===================== GOOGLE CALENDAR TOOLS =====================
+
+def get_user_calendars() -> list[dict]:
+    """Get list of user's calendars with id and name."""
+    service = get_calendar_service()
+    calendars = service.calendarList().list().execute().get("items", [])
+    
+    result = []
+    for cal in calendars:
+        result.append({
+            "id": cal["id"],
+            "name": cal.get("summary", "No Name")
+        })
+    return result
+
+
+def extract_event_details(events: list) -> list[dict]:
+    """Extract relevant details from calendar events."""
+    event_dict = []
+    for event in events:
+        event_id = event.get('id')
+        if not event_id:
+            continue
+        summary = event.get('summary', 'No Title')
+        creator = event.get('creator', {}).get('email', 'Unknown')
+        start = event.get('start', {})
+        end = event.get('end', {})
+        start_time = start.get('dateTime', 'N/A')
+        end_time = end.get('dateTime', 'N/A')
+        time_zone = start.get('timeZone', 'N/A')
+        event_dict.append({
+            'id': event_id,
+            'summary': summary,
+            'creator': creator,
+            'start': start_time,
+            'end': end_time,
+            'timeZone': time_zone
+        })
+    return event_dict
+
+
+def get_events_for_calendar(calendar_id: str, start_date: datetime | None = None, end_date: datetime | None = None) -> list[dict]:
+    """
+    Fetch events from a calendar within a specific date range.
+    """
+    service = get_calendar_service()
+
+    # Default: fetch events for today if no dates provided
+    if start_date is None:
+        start_date = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
+    if end_date is None:
+        end_date = start_date + timedelta(days=1)
+    
+    local_tz = pytz.timezone("America/New_York")
+
+    # Helper: accept str or datetime (aware/naive) and return an aware datetime in local_tz
+    def _to_localized(dt):
+        # parse strings (handles trailing 'Z')
+        if isinstance(dt, str):
+            dt = date_parser.parse(dt)
+        # If naive, assume it's in local_tz
+        if dt.tzinfo is None:
+            return local_tz.localize(dt)
+        # If aware, convert to local_tz
+        return dt.astimezone(local_tz)
+
+    start_local = _to_localized(start_date)
+    end_local = _to_localized(end_date)
+
+    # Convert to RFC3339 (UTC) for the API
+    time_min = start_local.astimezone(pytz.UTC).isoformat()
+    time_max = end_local.astimezone(pytz.UTC).isoformat()
+
+    events_result = service.events().list(
+        calendarId=calendar_id,
+        timeMin=time_min,
+        timeMax=time_max,
+        singleEvents=True,
+        orderBy="startTime", 
+    ).execute()
+
+    events = events_result.get("items", [])
+    return events
+
+@mcp.tool()
+async def current_date() -> str:
+    """Get the current date in YYYY-MM-DD format (Eastern Time)."""
+    logger.info(f"current_date called ")
+    eastern = pytz.timezone("America/New_York")
+    return datetime.now(eastern).strftime("%Y-%m-%d")
+
+
+@mcp.tool()
+async def get_calendar_list() -> str:
+    """MANDATORY: Call this FIRST before any other calendar operations to get calendar IDs.
+    Returns a list of all user calendars with their IDs and names. Must be called to get the calendar_id needed for other tools."""
+    logger.info("get_calendar_list called")
+    try:
+        calendars = get_user_calendars()
+        if not calendars:
+            return "No calendars found."
+        
+        result = "Available Calendars:\n"
+        for cal in calendars:
+            result += f"- {cal['name']} (ID: {cal['id']})\n"
+        logger.info(f"Retrieved {len(calendars)} calendars")
+        return result
+    except Exception as e:
+        logger.error(f"Error getting calendar list: {e}")
+        return f"Error fetching calendars: {str(e)}"
+
+
+@mcp.tool()
+async def get_calendar_events(calendar_id: str | None = None, start_date: str | None = None, end_date: str | None = None) -> str:
+    """Get events from a specific calendar.
+    REQUIRES: Call get_calendar_list() first to obtain calendar IDs and today’s date for default range.the
+    
+    Args:
+        calendar_id: Calendar ID (if not provided, uses primary calendar)
+        start_date: Start date as string (e.g., "2024-01-15" or ISO format)
+        end_date: End date as string (e.g., "2024-01-16" or ISO format)
+    """
+    logger.info(f"get_calendar_events called with calendar_id={calendar_id}, start_date={start_date}, end_date={end_date}")
+    try:
+        # Get primary calendar if not specified
+        if not calendar_id:
+            cals = get_user_calendars()
+            if not cals:
+                return "No calendars available."
+            calendar_id = cals[0]["id"]
+        
+        # Parse dates if provided
+        start_dt = date_parser.parse(start_date) if start_date else None
+        end_dt = date_parser.parse(end_date) if end_date else None
+        
+        events = get_events_for_calendar(calendar_id, start_dt, end_dt)
+        event_details = extract_event_details(events)
+        
+        if not event_details:
+            return f"No events found for the specified date range."
+        
+        result = f"Found {len(event_details)} events:\n"
+        for event in event_details:
+            result += f"\n- {event['summary']}\n"
+            result += f"  Start: {event['start']}\n"
+            result += f"  End: {event['end']}\n"
+            result += f"  Creator: {event['creator']}\n"
+        
+        logger.info(f"Retrieved {len(event_details)} events")
+        return result
+    except Exception as e:
+        logger.error(f"Error getting calendar events: {e}")
+        return f"Error fetching events: {str(e)}"
+
+
+@mcp.tool()
+async def create_calendar_event(summary: str, start: str, end: str, calendar_id: str | None = None, timezone: str = "America/New_York") -> str:
+    """Create a new calendar event.
+    
+    Args:
+        summary: Event title
+        start: Start time (e.g., "2024-01-15 14:00" or ISO format)
+        end: End time (e.g., "2024-01-15 15:00" or ISO format)
+        calendar_id: Calendar ID (if not provided, uses primary calendar)
+        timezone: IANA timezone name (default: America/New_York)
+    """
+    logger.info(f"create_calendar_event called with summary={summary}, start={start}, end={end}")
+    try:
+        service = get_calendar_service()
+        
+        # Get primary calendar if not specified
+        if not calendar_id:
+            cals = get_user_calendars()
+            if not cals:
+                return "No calendars available."
+            calendar_id = cals[0]["id"]
+        
+        # Parse strings to datetimes
+        start_dt = date_parser.parse(start) if isinstance(start, str) else start
+        end_dt = date_parser.parse(end) if isinstance(end, str) else end
+
+        # Ensure timezone-aware datetimes
+        tz = pytz.timezone(timezone)
+        if start_dt.tzinfo is None:
+            start_dt = tz.localize(start_dt)
+        else:
+            start_dt = start_dt.astimezone(tz)
+        if end_dt.tzinfo is None:
+            end_dt = tz.localize(end_dt)
+        else:
+            end_dt = end_dt.astimezone(tz)
+
+        event_body = {
+            "summary": summary,
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
+        }
+
+        created_event = service.events().insert(calendarId=calendar_id, body=event_body).execute()
+        logger.info(f"Event created with ID: {created_event.get('id')}")
+        return f"Event '{summary}' created successfully at {created_event.get('htmlLink', 'calendar')}"
+    except Exception as e:
+        logger.error(f"Error creating event: {e}")
+        return f"Error creating event: {str(e)}"
+
+
+# ===================== WEATHER TOOLS =====================
 
 async def make_nws_request(url: str) -> dict[str, Any] | None:
     """Make a request to the NWS API with proper error handling."""

@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 # ---- Configure these ----
-SERVER_CMD = ["python", "ollama_mcp.py"]  # <-- change to your server filename/path
+SERVER_CMD = ["python", "ollama_mcp.py"] 
 OLLAMA_API_BASE = "http://localhost:11434"
-OLLAMA_MODEL = "llama3.1:8b"  # Changed from gemma3:latest (doesn't support tools)
+OLLAMA_MODEL = "llama3.1:8b" 
 # -------------------------
 
 
@@ -137,11 +137,18 @@ async def main():
             {
                 "role": "system",
                 "content": (
-                    "You are a helpful assistant. Use tools when needed. "
-                    "If the user asks for weather alerts, use get_alerts(state). "
-                    "If the user asks for a forecast, use get_forecast(latitude, longitude). "
-                    "If the user asks to analyze or summarize weather output, you may use analyze_with_ollama(text) "
-                    "or respond directly."
+                    "You are a helpful assistant with access to weather and calendar tools. "
+                    "IMPORTANT - Always follow this sequence:\n"
+                    "1. For calendar requests: ALWAYS call get_calendar_list() FIRST to get available calendars and their IDs\n"
+                    "2. Then use get_calendar_events() to fetch events from the calendar ID you retrieved\n"
+                    "3. Use create_calendar_event() only when explicitly asked to create events\n"
+                    "4. For weather requests: Call get_alerts() or get_forecast() first, then optionally analyze_with_ollama() for insights\n"
+                    "5. Always explain your reasoning for which tool you're calling and why\n"
+                    "6. For any date/time references: Call current_date() FIRST to get today's date, then use that as your reference point for calculating date ranges. "
+                    "If the user doesn't specify dates, default to today and the next few days.\n\n"
+                    "Weather tools: get_alerts(state), get_forecast(latitude, longitude), analyze_with_ollama(text). "
+                    "Calendar tools: get_calendar_list(), get_calendar_events(calendar_id, start_date, end_date), create_calendar_event(). "
+                    "Date tool: current_date() - call this FIRST before any calendar operations that need dates."
                 ),
             }
         ]
