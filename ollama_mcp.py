@@ -26,8 +26,8 @@ mcp = FastMCP("weather-and-calendar")
 # Constants
 NWS_API_BASE = "https://api.weather.gov"
 USER_AGENT = "weather-app/1.0"
-OLLAMA_API_BASE = "http://localhost:11434"
-OLLAMA_MODEL = "llama3.1:8b" 
+# OLLAMA_API_BASE = "http://localhost:11434"
+# OLLAMA_MODEL = "llama3.1:8b" 
 
 
 # ===================== GOOGLE CALENDAR TOOLS =====================
@@ -114,9 +114,20 @@ def get_events_for_calendar(calendar_id: str, start_date: datetime | None = None
     events = events_result.get("items", [])
     return events
 
-@mcp.tool()
+@mcp.tool()  
+  
 async def current_date() -> str:
-    """Get the current date in YYYY-MM-DD format (Eastern Time)."""
+    """Get the user's current date in YYYY-MM-DD format (Eastern Time).
+    
+    MANDATORY: ALWAYS call this FIRST before any calendar operations.
+    Use this to compute relative dates (e.g., tomorrow = today + 1 day, next week = today + 7 days).
+    
+    Args:
+        None
+    
+    Returns:
+        str: Current date in format "YYYY-MM-DD" (e.g., "2026-01-26")
+    """
     logger.info(f"current_date called ")
     eastern = pytz.timezone("America/New_York")
     return datetime.now(eastern).strftime("%Y-%m-%d")
@@ -124,8 +135,22 @@ async def current_date() -> str:
 
 @mcp.tool()
 async def get_calendar_list() -> str:
-    """MANDATORY: Call this FIRST before any other calendar operations to get calendar IDs.
-    Returns a list of all user calendars with their IDs and names. Must be called to get the calendar_id needed for other tools."""
+    """Get list of all user calendars with their IDs and names.
+    
+    MANDATORY: Call this BEFORE any other calendar operations (get_calendar_events, create_calendar_event).
+    Use to obtain the calendar_id parameter required for other calendar tools.
+    If user does not specify a calendar, use the first available (primary).
+    
+    Args:
+        None
+    
+    Returns:
+        str: Formatted list of calendars, each with name and ID.
+        Example:
+            "Available Calendars:\n
+            - My Calendar (ID: primary)\n
+            - Work Events (ID: work@company.com)\n"
+    """
     logger.info("get_calendar_list called")
     try:
         calendars = get_user_calendars()
@@ -144,13 +169,27 @@ async def get_calendar_list() -> str:
 
 @mcp.tool()
 async def get_calendar_events(calendar_id: str | None = None, start_date: str | None = None, end_date: str | None = None) -> str:
-    """Get events from a specific calendar.
-    REQUIRES: Call get_calendar_list() first to obtain calendar IDs and today’s date for default range.the
+    """Retrieve events from a calendar within a specific date range.
+    
+    PREREQUISITES:
+    - Call get_calendar_list() first to obtain calendar_id (or use primary if not specified).
+    - Call current_date() to get today's date if start_date/end_date not provided by user.
+    - Infer end_date as start_date + 1 day (daily) or + 7 days (weekly) if not specified.
     
     Args:
-        calendar_id: Calendar ID (if not provided, uses primary calendar)
-        start_date: Start date as string (e.g., "2024-01-15" or ISO format)
-        end_date: End date as string (e.g., "2024-01-16" or ISO format)
+        calendar_id (str, optional): Calendar ID from get_calendar_list(). Defaults to primary calendar.
+        start_date (str, optional): Start date in "YYYY-MM-DD" or ISO format (e.g., "2026-01-26").
+        end_date (str, optional): End date in "YYYY-MM-DD" or ISO format (e.g., "2026-01-27").
+    
+    Returns:
+        str: Formatted list of events with details (title, start, end, creator).
+        Example:
+            "Found 2 events:\n
+            - Team Standup\n
+              Start: 2026-01-26T10:00:00-05:00\n
+              End: 2026-01-26T10:30:00-05:00\n
+              Creator: user@example.com\n"
+        Returns "No events found for the specified date range." if none match.
     """
     logger.info(f"get_calendar_events called with calendar_id={calendar_id}, start_date={start_date}, end_date={end_date}")
     try:
@@ -160,7 +199,7 @@ async def get_calendar_events(calendar_id: str | None = None, start_date: str | 
             if not cals:
                 return "No calendars available."
             calendar_id = cals[0]["id"]
-        
+            
         # Parse dates if provided
         start_dt = date_parser.parse(start_date) if start_date else None
         end_dt = date_parser.parse(end_date) if end_date else None
@@ -187,14 +226,26 @@ async def get_calendar_events(calendar_id: str | None = None, start_date: str | 
 
 @mcp.tool()
 async def create_calendar_event(summary: str, start: str, end: str, calendar_id: str | None = None, timezone: str = "America/New_York") -> str:
-    """Create a new calendar event.
+    """Create a new calendar event with specified title, start time, and end time.
+    
+    PREREQUISITES:
+    - Call get_calendar_list() first to obtain calendar_id (or use primary if not specified).
+    - Call current_date() to infer dates if user provides relative time references.
+    - Validate that start < end before calling this tool.
     
     Args:
-        summary: Event title
-        start: Start time (e.g., "2024-01-15 14:00" or ISO format)
-        end: End time (e.g., "2024-01-15 15:00" or ISO format)
-        calendar_id: Calendar ID (if not provided, uses primary calendar)
-        timezone: IANA timezone name (default: America/New_York)
+        summary (str, required): Event title/description.
+        start (str, required): Start time in "YYYY-MM-DDTHH:MM:SS" or ISO format (e.g., "2026-01-26T14:00:00").
+        end (str, required): End time in "YYYY-MM-DDTHH:MM:SS" or ISO format (e.g., "2026-01-26T15:00:00").
+        calendar_id (str, optional): Calendar ID from get_calendar_list(). Defaults to primary calendar.
+        timezone (str, optional): IANA timezone name. Defaults to "America/New_York".
+    
+    Returns:
+        str: Success message with event link or error description.
+        Example:
+            "Event 'Team Meeting' created successfully at https://calendar.google.com/calendar/u/0/r/eventedit/abc123"
+        On error:
+            "Error creating event: [error details]"
     """
     logger.info(f"create_calendar_event called with summary={summary}, start={start}, end={end}")
     try:
@@ -262,31 +313,43 @@ Instructions: {props.get("instruction", "No specific instructions provided")}
 """
 
 
-async def ask_ollama(prompt: str) -> str:
-    """Send a prompt to ollama and get a response."""
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(
-                f"{OLLAMA_API_BASE}/api/generate",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                },
-                timeout=60.0,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("response", "No response from ollama").strip()
-        except Exception as e:
-            return f"Error communicating with ollama: {str(e)}"
+# async def ask_ollama(prompt: str) -> str:
+#     """Send a prompt to ollama and get a response."""
+#     async with httpx.AsyncClient() as client:
+#         try:
+#             response = await client.post(
+#                 f"{OLLAMA_API_BASE}/api/generate",
+#                 json={
+#                     "model": OLLAMA_MODEL,
+#                     "prompt": prompt,
+#                     "stream": False,
+#                 },
+#                 timeout=60.0,
+#             )
+#             response.raise_for_status()
+#             data = response.json()
+#             return data.get("response", "No response from ollama").strip()
+#         except Exception as e:
+#             return f"Error communicating with ollama: {str(e)}"
 
 @mcp.tool()
 async def get_alerts(state: str) -> str:
-    """Get weather alerts for a US state.
-
+    """Retrieve active weather alerts for a US state.
+    
     Args:
-        state: Two-letter US state code (e.g. CA, NY)
+        state (str, required): Two-letter US state code (uppercase, e.g., "CA", "NY", "TX").
+    
+    Returns:
+        str: Formatted list of active alerts with event, area, severity, description, and instructions.
+        Example:
+            "Event: Winter Storm Warning\n
+            Area: Los Angeles County\n
+            Severity: Moderate\n
+            Description: Heavy snow expected...\n
+            Instructions: Stay indoors...\n
+            ---\n
+            [next alert]"
+        Returns "No active alerts for this state." if none found.
     """
     logger.info(f"get_alerts called with state={state}")
     url = f"{NWS_API_BASE}/alerts/active/area/{state}"
@@ -307,11 +370,25 @@ async def get_alerts(state: str) -> str:
 
 @mcp.tool()
 async def get_forecast(latitude: float, longitude: float) -> str:
-    """Get weather forecast for a location.
-
+    """Retrieve weather forecast for a geographic location.
+    
     Args:
-        latitude: Latitude of the location
-        longitude: Longitude of the location
+        latitude (float, required): Latitude of the location (e.g., 40.7128 for New York).
+        longitude (float, required): Longitude of the location (e.g., -74.0060 for New York).
+    
+    Returns:
+        str: Formatted forecast periods (first 5 periods) with name, temperature, wind, and detailed forecast.
+        Example:
+            "Tonight:\n
+            Temperature: 28°F\n
+            Wind: 10 mph E\n
+            Forecast: Mostly clear. Low 28F.\n
+            ---\n
+            Tuesday:\n
+            Temperature: 45°F\n
+            Wind: 5 mph N\n
+            Forecast: Partly cloudy. High 45F.\n"
+        Returns "Unable to fetch forecast data for this location." on error.
     """
     logger.info(f"get_forecast called with lat={latitude}, lon={longitude}")
     # First get the forecast grid endpoint
@@ -347,25 +424,25 @@ Forecast: {period["detailedForecast"]}
     return "\n---\n".join(forecasts)
 
 
-@mcp.tool()
-async def analyze_with_ollama(text: str) -> str:
-    """Use ollama to analyze weather data or answer questions about it.
+# @mcp.tool()
+# async def analyze_with_ollama(text: str) -> str:
+#     """Use ollama to analyze weather data or answer questions about it.
 
-    Args:
-        text: Text to analyze or question to answer
-    """
-    logger.info(f"analyze_with_ollama called with text length={len(text)}")
-    prompt = f"You are a helpful weather assistant. Please analyze the following and provide helpful insights:\n\n{text}\n\nProvide a concise, helpful response."
-    result = await ask_ollama(prompt)
-    logger.info(f"analyze_with_ollama returning result with length={len(result)}")
-    return result
+#     Args:
+#         text: Text to analyze or question to answer
+#     """
+#     logger.info(f"analyze_with_ollama called with text length={len(text)}")
+#     prompt = f"You are a helpful weather assistant. Please analyze the following and provide helpful insights:\n\n{text}\n\nProvide a concise, helpful response."
+#     result = await ask_ollama(prompt)
+#     logger.info(f"analyze_with_ollama returning result with length={len(result)}")
+#     return result
 
 
 def main():
     # If you want logs, send them to stderr, not stdout.
     logger.info("========== Starting MCP server (stdio) ==========")
-    logger.info(f"Model: {OLLAMA_MODEL}")
-    logger.info(f"NWS API Base: {NWS_API_BASE}")
+    # logger.info(f"Model: {OLLAMA_MODEL}")
+    logger.info(f"National Weather Services API Base: {NWS_API_BASE}")
     mcp.run(transport="stdio")
 
 
